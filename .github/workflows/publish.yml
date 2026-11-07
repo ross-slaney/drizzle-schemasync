@@ -1,0 +1,39 @@
+name: Publish
+
+# Publish a GitHub release whose tag is `v` + the version in package.json. This
+# tests, packs and attaches the tarball to the release. With an NPM_TOKEN
+# repository secret it also publishes to npm.
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    name: Test, pack and attach
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # attach the tarball to the release
+      id-token: write # npm provenance
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - run: npm run check
+      - name: The tag is the version
+        run: test "v$(node -p "require('./package.json').version")" = "${{ github.event.release.tag_name }}"
+      - run: npm pack
+      - name: Attach the tarball
+        run: gh release upload "${{ github.event.release.tag_name }}" drizzle-schemasync-*.tgz --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then echo "No NPM_TOKEN secret: the release tarball is the package."; exit 0; fi
+          npm publish --provenance --access public
