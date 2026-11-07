@@ -54,7 +54,7 @@ SQLite can add a column in place, and the plan uses that when it can. Any other 
 ## Getting started
 
 ```bash
-npm install https://github.com/ross-slaney/drizzle-schemasync/releases/download/v0.1.0/drizzle-schemasync-0.1.0.tgz
+npm install https://github.com/ross-slaney/drizzle-schemasync/releases/download/v0.1.1/drizzle-schemasync-0.1.1.tgz
 ```
 
 `drizzle-orm` is a peer dependency. There are no others.
@@ -260,6 +260,7 @@ Core Data's lightweight migration and Realm's automatic migration already work t
 - Unnamed `CHECK` constraints in a table you created by hand are not seen. Drizzle always names them.
 - Adding a unique index or a `CHECK` is treated as losing rows whenever the table has any, without looking at whether they would actually conflict. That errs on the safe side, but it may discard rows that would have been fine.
 - `PRAGMA user_version` is used for the fingerprint unless you turn that off.
+- Discarding a parent table's rows while a child table keeps rows pointing at them fails the foreign key check and rolls back. Allow the loss on the child too, or drop the foreign key.
 - Two connections must not run this at once. Hold a lock if your platform allows two, such as a Web Lock in a browser.
 
 ## Tests

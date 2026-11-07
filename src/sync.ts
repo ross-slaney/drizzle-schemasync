@@ -2,7 +2,7 @@ import { toConnection, type AsyncConnection, type AsyncTarget, type Connection, 
 import { SchemaChangesBlockedError } from "./errors";
 import { buildSnapshot, COLUMNS_QUERY, FOREIGN_KEYS_QUERY, MASTER_QUERY, rowProbes, type ColumnRow, type DatabaseSnapshot, type ForeignKeyRow, type MasterRow } from "./inspect";
 import { describeSchema, fingerprint, type SchemaModel, type SchemaSource } from "./model";
-import { describePolicy, planChanges, plansRebuild, type PlanOptions, type SchemaPlan } from "./plan";
+import { describePolicy, planChanges, plansTableDrop, type PlanOptions, type SchemaPlan } from "./plan";
 
 export interface SchemaSyncOptions extends PlanOptions {
   /** Compare and report. Nothing changes, and nothing is blocked: the risks are in the plan. */
@@ -78,12 +78,11 @@ function* deploy(schema: SchemaSource | SchemaModel, options: SchemaSyncOptions)
     return { status: "unchanged", plan, skippedComparison: false };
   }
 
-  const rebuilds = plansRebuild(plan);
   const [foreignKeys] = yield* query<{ foreign_keys: number }>("PRAGMA foreign_keys");
-  const enforcing = Number(foreignKeys?.foreign_keys) === 1;
-  // SQLite ignores this inside a transaction, and a rebuild's DROP TABLE would otherwise delete the rows that reference it.
-  const suspend = rebuilds && enforcing;
+  // SQLite ignores this inside a transaction, and a DROP TABLE would otherwise delete the rows that reference the table.
+  const suspend = plansTableDrop(plan) && Number(foreignKeys?.foreign_keys) === 1;
   if (suspend) yield* run("PRAGMA foreign_keys = OFF");
+  let failed = false;
   try {
     yield* run("BEGIN");
     try {
@@ -100,6 +99,7 @@ function* deploy(schema: SchemaSource | SchemaModel, options: SchemaSyncOptions)
       if (track) yield* run(`PRAGMA user_version = ${mark}`);
       yield* run("COMMIT");
     } catch (error) {
+      failed = true;
       // SQLite may already have ended the transaction on its own. The statement's error is the one that says why.
       try {
         yield* run("ROLLBACK");
@@ -109,7 +109,14 @@ function* deploy(schema: SchemaSource | SchemaModel, options: SchemaSyncOptions)
       throw error;
     }
   } finally {
-    if (suspend) yield* run("PRAGMA foreign_keys = ON");
+    if (suspend) {
+      try {
+        yield* run("PRAGMA foreign_keys = ON");
+      } catch (error) {
+        // A connection too broken for this has already said why. Otherwise this is the failure to report.
+        if (!failed) throw error;
+      }
+    }
   }
   return { status: "applied", plan, skippedComparison: false };
 }

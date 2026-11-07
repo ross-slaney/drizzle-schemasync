@@ -94,8 +94,11 @@ export function readChecks(createTable: string): { name: string; expression: str
 
 export function buildSnapshot(master: readonly MasterRow[], columnRows: readonly ColumnRow[], foreignKeyRows: readonly ForeignKeyRow[]): DatabaseSnapshot {
   const tables: TableModel[] = [];
+  const isVirtual = (row: MasterRow) => row.type === "table" && /^\s*CREATE\s+VIRTUAL\b/i.test(row.sql ?? "");
+  // A virtual table keeps its data in ordinary tables named after it (search_data, search_idx). They are its, not ours.
+  const shadowPrefixes = master.filter(isVirtual).map((row) => `${row.name}_`);
   for (const row of master) {
-    if (row.type !== "table" || /^\s*CREATE\s+VIRTUAL\b/i.test(row.sql ?? "")) continue;
+    if (row.type !== "table" || isVirtual(row) || shadowPrefixes.some((prefix) => row.name.startsWith(prefix))) continue;
     const createSql = row.sql ?? "";
     const own = columnRows.filter((column) => column.tableName === row.name && Number(column.hidden) === 0);
     const autoIncrement = /\bAUTOINCREMENT\b/i.test(createSql);

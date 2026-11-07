@@ -459,18 +459,53 @@ describe("what the schema does not mention", () => {
     expect(objects(database, "table")).toEqual(["items"]);
   });
 
-  it("does not trip over a table's own virtual cousins or ignored triggers", () => {
+  it("leaves a virtual table and the tables that hold its data alone, even with removal allowed", () => {
     const database = seeded();
-    database.raw.exec(`CREATE VIRTUAL TABLE search USING fts5(body); CREATE TABLE ledger (id text); CREATE TRIGGER ledger_t AFTER INSERT ON ledger BEGIN SELECT 1; END`);
+    database.raw.exec(`CREATE VIRTUAL TABLE search USING fts5(body); INSERT INTO search VALUES ('kitchen')`);
+
+    const result = syncSchema(database, { items }, { allowObjectRemoval: true, allowDataLoss: true });
+
+    expect(result.plan.statements).toEqual([]);
+    expect(rows(database, "SELECT body FROM search WHERE search MATCH 'kitchen'")).toEqual([{ body: "kitchen" }]);
+  });
+
+  it("does not bring back or trip over a trigger on an ignored table", () => {
+    const database = seeded();
+    database.raw.exec(`CREATE TABLE ledger (id text); CREATE TRIGGER ledger_t AFTER INSERT ON ledger BEGIN SELECT 1; END`);
     const next = sqliteTable("items", { id: text("id").primaryKey(), title: text("title"), done: integer("done", { mode: "boolean" }).notNull().default(false), tags: text("tags", { mode: "json" }).notNull().default([]) }, (table) => [
       index("items_title").on(table.title),
     ]);
 
-    const result = syncSchema(database, { items: next }, { ignoreTables: ["ledger", "search_data", "search_idx", "search_content", "search_docsize", "search_config"] });
+    const result = syncSchema(database, { items: next }, { ignoreTables: ["ledger"] });
 
     expect(result.status).toBe("applied");
     expect(objects(database, "trigger")).toEqual(["ledger_t"]);
-    expect(objects(database, "table")).toContain("search");
+  });
+
+  it("never reuses an AUTOINCREMENT key after a rebuild, even one whose row is gone", () => {
+    const queue = sqliteTable("queue", { seq: integer("seq").primaryKey({ autoIncrement: true }), body: text("body").notNull() });
+    const relaxed = sqliteTable("queue", { seq: integer("seq").primaryKey({ autoIncrement: true }), body: text("body") });
+    const database = open();
+    syncSchema(database, { queue });
+    database.raw.exec(`INSERT INTO queue (body) VALUES ('a'), ('b'), ('c'); DELETE FROM queue WHERE body = 'c'`);
+
+    const result = syncSchema(database, { queue: relaxed });
+
+    expect(result.plan.changes).toContain("Rebuild table queue, keeping its rows");
+    database.raw.exec(`INSERT INTO queue (body) VALUES ('next')`);
+    expect(rows(database, "SELECT seq FROM queue WHERE body = 'next'")).toEqual([{ seq: 4 }]);
+    expect(rows(database, "SELECT count(*) AS n FROM sqlite_sequence")).toEqual([{ n: 1 }]);
+  });
+
+  it("starts an AUTOINCREMENT table over only when no rows came across", () => {
+    const queue = sqliteTable("queue", { seq: integer("seq").primaryKey({ autoIncrement: true }), body: text("body") });
+    const database = open(`CREATE TABLE queue (seq integer PRIMARY KEY AUTOINCREMENT NOT NULL, body integer)`, `INSERT INTO queue (body) VALUES (1), (2)`);
+
+    const result = syncSchema(database, { queue }, { allowDataLoss: true });
+
+    expect(result.plan.discardedRows).toEqual(["queue"]);
+    database.raw.exec(`INSERT INTO queue (body) VALUES ('first')`);
+    expect(rows(database, "SELECT seq FROM queue")).toEqual([{ seq: 1 }]);
   });
 });
 
@@ -555,6 +590,46 @@ describe("foreign keys", () => {
 
     expect(rows(database, "SELECT sql FROM sqlite_master WHERE name = 'parent'")[0]?.sql).not.toContain("DEFAULT");
     expect(rows(database, "PRAGMA foreign_keys")).toEqual([{ foreign_keys: 1 }]);
+  });
+
+  it("removes a parent table with enforcement on without cascading away the rows of a table that stays", () => {
+    const database = populated();
+    const free = sqliteTable("child", { id: text("id").primaryKey(), parentId: text("parent_id") });
+
+    const result = syncSchema(database, { child: free }, { allowObjectRemoval: true, allowDataLoss: true });
+
+    expect(result.plan.discardedRows).toEqual(["parent"]);
+    expect(rows(database, "SELECT id, parent_id FROM child")).toEqual([{ id: "c", parent_id: "p" }]);
+    expect(rows(database, "PRAGMA foreign_keys")).toEqual([{ foreign_keys: 1 }]);
+  });
+
+  it("reports the real failure when even turning enforcement back on fails", () => {
+    const database = populated();
+    const nextParent = sqliteTable("parent", { id: text("id").primaryKey(), note: text("note").notNull().default("") });
+    const broken = {
+      all: database.all,
+      exec(statement: string) {
+        if (statement === "PRAGMA foreign_keys = ON") throw new Error("connection is gone");
+        if (statement.startsWith("INSERT INTO")) throw new Error("disk I/O error");
+        database.exec(statement);
+      },
+    };
+
+    expect(() => syncSchema(broken, { parent: nextParent, child })).toThrow("disk I/O error");
+  });
+
+  it("reports turning enforcement back on when that is the only failure", () => {
+    const database = populated();
+    const nextParent = sqliteTable("parent", { id: text("id").primaryKey(), note: text("note").notNull().default("") });
+    const broken = {
+      all: database.all,
+      exec(statement: string) {
+        if (statement === "PRAGMA foreign_keys = ON") throw new Error("connection is gone");
+        database.exec(statement);
+      },
+    };
+
+    expect(() => syncSchema(broken, { parent: nextParent, child })).toThrow("connection is gone");
   });
 
   it("sees a changed action as a change, with no loss", () => {

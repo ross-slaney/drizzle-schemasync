@@ -329,6 +329,12 @@ export function planChanges(actual: DatabaseSnapshot, desired: SchemaModel, opti
       const names = copied.map((column) => quote(column.name)).join(", ");
       const values = copied.map((column) => (tightened.has(column.name) ? `COALESCE(${quote(column.name)}, ${column.defaultSql})` : quote(column.name))).join(", ");
       body.push(`INSERT INTO ${quote(temporary)} (${names}) SELECT ${values} FROM ${quote(name)}`);
+      // AUTOINCREMENT promises a key is never reused, which needs the high-water mark and not just the highest key left.
+      if (existing.columns.some((column) => column.autoIncrement) && target.columns.some((column) => column.autoIncrement)) {
+        const table = (value: string) => value.replace(/'/g, "''");
+        body.push(`DELETE FROM sqlite_sequence WHERE name = '${table(temporary)}'`);
+        body.push(`INSERT INTO sqlite_sequence (name, seq) SELECT '${table(temporary)}', seq FROM sqlite_sequence WHERE name = '${table(name)}'`);
+      }
     }
     body.push(`DROP TABLE ${quote(name)}`);
     body.push(`ALTER TABLE ${quote(temporary)} RENAME TO ${quote(name)}`);
@@ -368,7 +374,7 @@ export function planChanges(actual: DatabaseSnapshot, desired: SchemaModel, opti
   return plan;
 }
 
-/** Whether the plan rebuilds a table, the case that needs foreign keys off and checked afterwards. */
-export function plansRebuild(plan: SchemaPlan): boolean {
-  return plan.statements.some((statement) => statement.startsWith('CREATE TABLE "__schemasync_new_'));
+/** Whether the plan drops a table, a rebuild's included: with foreign keys on, that would delete the rows that reference it. */
+export function plansTableDrop(plan: SchemaPlan): boolean {
+  return plan.statements.some((statement) => statement.startsWith("DROP TABLE "));
 }

@@ -1,6 +1,6 @@
 {
   "name": "drizzle-schemasync",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Your Drizzle schema is your SQLite database. Diff it against the live database and apply the difference, on the device, with no migration files.",
   "license": "MIT",
   "author": "Ross Slaney",
